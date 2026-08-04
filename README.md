@@ -1,106 +1,75 @@
-# Nexus Shield Security Gatekeeper
+# 🛡️ Nexus Shield Security Gatekeeper
 
-Edge-speed **PII & secret leak detection** for GitHub Pull Requests.
+> Edge-Speed PII & Secret Leak Prevention for GitHub Actions & CI/CD Pipelines.
 
-Nexus Shield scans PR diffs for sensitive data — Turkish Identity Numbers (TCKN), credit cards, emails, API keys, private keys, JWTs, and AWS credentials. When a leak is detected, the workflow fails and an automated Markdown report is posted on the PR.
+[![GitHub Release](https://img.shields.io/github/v/release/baturhantasdelen-sudo/nexus-shield-action?style=flat-square&color=black)](https://github.com/baturhantasdelen-sudo/nexus-shield-action/releases)
+[![Marketplace](https://img.shields.io/badge/GitHub-Marketplace-blue?style=flat-square&logo=github)](https://github.com/marketplace/actions/nexus-shield-security-gatekeeper)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
-## Features
+**Nexus Shield** prevents sensitive data leaks (PII, API Keys, Passwords, Credit Cards) before they ever hit your main branch. It automatically scans PR diffs at edge speeds, comments with precise locations, and blocks compromised PRs.
 
-- Scans **changed files in pull requests**
-- Detects:
-  - TCKN (11-digit Turkish ID with checksum validation)
-  - Credit card numbers (major brands + Luhn check)
-  - Email addresses
-  - OpenAI / Anthropic / Vercel API keys
-  - AWS access keys (`AKIA...`)
-  - Private keys (`-----BEGIN PRIVATE KEY-----`)
-  - JWTs
-  - Generic hardcoded secrets (`api_key=...`, `password=...`)
-- Skips safe templates: `.env.example`, mocks, fixtures, test files
-- Always flags real env files: `.env`, `.env.local`, `.env.production`
-- Posts or updates a single PR comment with a masked findings table
-- Fails the workflow when leaks are found (configurable)
+---
 
-## Usage
+## ⚡ Key Features
 
-Add this workflow to `.github/workflows/nexus-shield.yml`:
+- 🇹🇷 **TCKN & Regional PII Detection:** Validates Turkish Identity Numbers (TCKN) with checksum algorithms.
+- 💳 **Financial Data Guard:** Detects Credit Card numbers with standard Luhn validation.
+- 🔑 **API Keys & Secrets:** Blocks leaked OpenAI, Anthropic, Vercel API keys, AWS credentials, JWTs, and Private Keys.
+- 💬 **Rich PR Annotations:** Leaves line-by-line annotations and clear GitHub Action summary tables.
+- 🚫 **Zero-False-Positive Filtering:** Automatically ignores `.env.example`, mocks, and test files while flagging actual leaks.
+
+---
+
+## 📸 Real Detection Preview
+
+When a leak is detected, **Nexus Shield** blocks the workflow and highlights exact line numbers:
+
+```text
+❌ [TCKN] 1000000****0146 found in test-leak.txt#L3
+❌ [OpenAI API Key] sk-proj-*****************cdef found in test-leak.txt#L2
+```
+
+---
+
+## 🚀 Quick Start
+
+Add the following workflow file to your repository at `.github/workflows/nexus-shield.yml`:
 
 ```yaml
 name: Nexus Shield Security Gatekeeper
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
-
-permissions:
-  contents: read
-  pull-requests: write
+    branches: [main, master]
 
 jobs:
-  scan:
+  security-check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Run Nexus Shield scan
+      - name: Run Nexus Shield Gatekeeper
         uses: baturhantasdelen-sudo/nexus-shield-action@v1
         with:
-          github-token: ${{ github.token }}
-          fail-on-detection: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-detection: "true"
 ```
 
-## Inputs
+---
 
-| Input | Required | Default | Description |
-| :--- | :---: | :--- | :--- |
-| `github-token` | Yes | `${{ github.token }}` | Token used for PR comments |
-| `fail-on-detection` | No | `true` | Fail the job when leaks are detected |
+## ⚙️ Configuration Inputs
 
-## Example PR Comment
+| Input | Description | Required | Default |
+| :--- | :--- | :---: | :--- |
+| `github-token` | GitHub token for reading diffs & posting PR comments | Yes | `${{ github.token }}` |
+| `fail-on-detection` | Fail the workflow step if any leak is detected (`true`/`false`) | No | `"true"` |
 
-When issues are found, Nexus Shield posts a comment like:
+---
 
-| File | Line | Issue Type | Masked Preview |
-| :--- | ---: | :--- | :--- |
-| `src/config.ts` | 12 | **OpenAI API Key** | `sk-proj****9f2a` |
-| `.env` | 3 | **Generic Secret** | `api_key****1234` |
+## 📄 License
 
-## Development
-
-```bash
-npm install
-npm run build
-```
-
-The build bundles the action into `dist/index.js` via `@vercel/ncc`.
-
-### Local typecheck
-
-```bash
-npm run typecheck
-```
-
-## Publishing to GitHub Marketplace
-
-1. Push this repository to GitHub
-2. Create a release tagged `v1.0.0`
-3. Check **Publish this Action to the GitHub Marketplace**
-4. Publish the release
-
-Consumers can then reference:
-
-```yaml
-uses: baturhantasdelen-sudo/nexus-shield-action@v1
-```
-
-## Security Notes
-
-- This action scans PR content only; it does not upload code to external services
-- Detected values are masked in PR comments
-- Rotate any credential that was exposed in git history
-
-## License
-
-MIT © Nexus Shield Team
+Distributed under the MIT License. Built with ❤️ by Baturhan Taşdelen.
