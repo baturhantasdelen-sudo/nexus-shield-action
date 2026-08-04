@@ -45,7 +45,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run Nexus Shield scan
-        uses: baturhantasdelen/nexus-shield-action@v1
+        uses: baturhantasdelen-sudo/nexus-shield-action@v1
         with:
           github-token: ${{ github.token }}
           fail-on-detection: true
@@ -92,7 +92,7 @@ npm run typecheck
 Consumers can then reference:
 
 ```yaml
-uses: baturhantasdelen/nexus-shield-action@v1
+uses: baturhantasdelen-sudo/nexus-shield-action@v1
 ```
 
 ## Security Notes
