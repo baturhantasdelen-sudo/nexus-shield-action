@@ -1,0 +1,21 @@
+{
+  "name": "nexus-shield-action",
+  "version": "1.0.0",
+  "description": "GitHub Action — automated PII and secret leak detection for pull requests",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build src/index.ts -o dist --minify",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/exec": "^1.1.1",
+    "@actions/github": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vercel/ncc": "^0.38.3",
+    "typescript": "^5.8.0"
+  }
+}
