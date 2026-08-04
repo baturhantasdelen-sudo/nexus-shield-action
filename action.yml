@@ -1,19 +1,23 @@
 name: Nexus Shield Security Gatekeeper
-description: Edge-speed PII & Secret leak detection for PRs
-author: Nexus Shield Team
+description: Edge-speed PII & Secret leak detection for PRs and CI/CD pipelines
+author: baturhantasdelen-sudo
 branding:
   icon: shield
   color: blue
 
 inputs:
   github-token:
-    description: GitHub token for API access and PR comments
+    description: GitHub Token for reading diffs and posting PR comments
     required: true
     default: ${{ github.token }}
-  fail-on-detection:
-    description: Fail the workflow when PII or secrets are detected
+  nexus-api-key:
+    description: Optional API Key to log anonymous leak stats to your Nexus Shield Dashboard
     required: false
-    default: "true"
+    default: ''
+  fail-on-detection:
+    description: Whether to fail the workflow step when leaks are detected
+    required: false
+    default: 'true'
 
 runs:
   using: node24

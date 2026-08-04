@@ -1,5 +1,14 @@
+import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { ScanIssue } from './scanner';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { scanContent, ScanIssue } from './scanner';
+
+export interface ScanResult {
+  totalLeaks: number;
+  leakSummary: Record<string, number>;
+  issuesByFile: Map<string, ScanIssue[]>;
+}
 
 export interface ChangedFile {
   filename: string;
@@ -208,4 +217,91 @@ export function logIssueSummary(issuesByFile: Map<string, ScanIssue[]>): void {
       );
     }
   }
+}
+
+export function buildLeakSummary(issuesByFile: Map<string, ScanIssue[]>): Record<string, number> {
+  const summary: Record<string, number> = {};
+
+  for (const issues of issuesByFile.values()) {
+    for (const issue of issues) {
+      summary[issue.type] = (summary[issue.type] ?? 0) + 1;
+    }
+  }
+
+  return summary;
+}
+
+async function readWorkspaceFile(filename: string): Promise<string | undefined> {
+  const workspace = process.env.GITHUB_WORKSPACE;
+  if (!workspace) {
+    return undefined;
+  }
+
+  const absolutePath = path.join(workspace, filename);
+  try {
+    return await fs.readFile(absolutePath, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+async function scanChangedFile(filename: string, patch?: string): Promise<ScanIssue[]> {
+  const workspaceContent = await readWorkspaceFile(filename);
+  const content =
+    workspaceContent ??
+    (patch ? extractScannableContent({ filename, status: 'modified', patch }).content : '');
+
+  if (!content) {
+    return [];
+  }
+
+  const issues = scanContent(content, filename);
+
+  if (workspaceContent && patch) {
+    const patchContent = extractScannableContent({ filename, status: 'modified', patch }).content;
+    const patchIssues = scanContent(patchContent, filename);
+    const merged = new Map<string, ScanIssue>();
+
+    for (const issue of [...issues, ...patchIssues]) {
+      merged.set(`${issue.type}:${issue.line}:${issue.column}:${issue.preview}`, issue);
+    }
+
+    return [...merged.values()].sort((a, b) => a.line - b.line || a.column - b.column);
+  }
+
+  return adjustIssueLines(issues, 0);
+}
+
+export async function processPRDiffAndComment(githubToken: string): Promise<ScanResult> {
+  const { owner, repo, pullNumber } = getPullRequestContext();
+  core.info(`Scanning PR #${pullNumber} in ${owner}/${repo}`);
+
+  const changedFiles = await getPullRequestChangedFiles(githubToken, owner, repo, pullNumber);
+  core.info(`Found ${changedFiles.length} changed file(s) to inspect.`);
+
+  const issuesByFile = new Map<string, ScanIssue[]>();
+
+  for (const file of changedFiles) {
+    const issues = await scanChangedFile(file.filename, file.patch);
+    if (issues.length > 0) {
+      issuesByFile.set(file.filename, issues);
+    }
+  }
+
+  const totalLeaks = [...issuesByFile.values()].reduce((sum, issues) => sum + issues.length, 0);
+  const leakSummary = buildLeakSummary(issuesByFile);
+
+  if (totalLeaks === 0) {
+    await deletePullRequestComment(githubToken, owner, repo, pullNumber);
+    return { totalLeaks, leakSummary, issuesByFile };
+  }
+
+  core.warning(`Detected ${totalLeaks} potential leak(s).`);
+  logIssueSummary(issuesByFile);
+
+  const commentBody = formatPullRequestComment(issuesByFile, pullNumber);
+  await upsertPullRequestComment(githubToken, owner, repo, pullNumber, commentBody);
+  core.info('Posted Nexus Shield security report to the pull request.');
+
+  return { totalLeaks, leakSummary, issuesByFile };
 }
