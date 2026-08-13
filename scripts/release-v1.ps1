@@ -23,7 +23,7 @@ git tag -a $TagVersion -m $TagMessage
 git tag -f $TagMajor -m $TagMajorMessage
 
 Write-Host "==> Pushing tags to origin"
-git push origin $TagVersion
+git push origin --force $TagVersion
 git push origin --force $TagMajor
 
 Write-Host "Done. Published tags: $TagVersion and $TagMajor"

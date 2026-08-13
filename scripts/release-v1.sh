@@ -22,7 +22,7 @@ git tag -a "$TAG_VERSION" -m "$TAG_MESSAGE"
 git tag -f "$TAG_MAJOR" -m "$TAG_MAJOR_MESSAGE"
 
 echo "==> Pushing tags to origin"
-git push origin "$TAG_VERSION"
+git push origin --force "$TAG_VERSION"
 git push origin --force "$TAG_MAJOR"
 
 echo "Done. Published tags: $TAG_VERSION and $TAG_MAJOR"
