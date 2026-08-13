@@ -6,7 +6,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
+  security-events: write
 
 jobs:
   security-check:
@@ -14,9 +14,12 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Run Nexus Shield Gatekeeper
-        uses: baturhantasdelen-sudo/nexus-shield-action@v1
         with:
-          github-token: ${{ github.token }}
-          fail-on-detection: true
+          fetch-depth: 0
+
+      - name: Run Nexus Shield Security Scan
+        uses: ./
+        with:
+          api_key: ${{ secrets.NEXUS_SHIELD_API_KEY }}
+          profile: TR
+          policy_file: .nexus-shield.yml

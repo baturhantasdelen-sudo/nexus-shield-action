@@ -53,30 +53,38 @@ When a leak is detected, **Nexus Shield** blocks the workflow and highlights exa
 
 Add the following workflow file to your repository at `.github/workflows/nexus-shield.yml`:
 
+### GitHub Marketplace
+
 ```yaml
-name: Nexus Shield Security Gatekeeper
+name: Nexus Shield Security Scan
 
 on:
-  pull_request:
+  push:
     branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
-  security-check:
+  security-scan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Run Nexus Shield Gatekeeper
+      - name: Nexus Shield Security Scan
         uses: baturhantasdelen-sudo/nexus-shield-action@v1
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          nexus-api-key: ${{ secrets.NEXUS_API_KEY }}
-          fail-on-detection: "true"
+          api_key: ${{ secrets.NEXUS_SHIELD_API_KEY }}
+          profile: 'TR'
+          policy_file: '.nexus-shield.yml'
 ```
+
+> **Marketplace:** [Nexus Shield Security Scan](https://github.com/marketplace/actions/nexus-shield-security-scan) — pin with `@v1` for stable major releases.
 
 ---
 
@@ -84,9 +92,29 @@ jobs:
 
 | Input | Description | Required | Default |
 | :--- | :--- | :---: | :--- |
-| `github-token` | GitHub token for reading diffs & posting PR comments | Yes | `${{ github.token }}` |
-| `nexus-api-key` | Optional API key for anonymous leak stats telemetry | No | `""` |
-| `fail-on-detection` | Fail the workflow step if any leak is detected (`true`/`false`) | No | `"true"` |
+| `api_key` | Nexus Shield API key for `/api/v1/scan` | Yes | — |
+| `profile` | Regional PII profile (`TR`, `US`, `GLOBAL`) | No | `TR` |
+| `policy_file` | Policy file path (`.nexus-shield.yml`) | No | `.nexus-shield.yml` |
+
+The action scans changed files in the commit/PR, requests **SARIF 2.1.0** output from the Nexus Shield API, and uploads results to the **GitHub Code Scanning** tab via `github/codeql-action/upload-sarif@v3`.
+
+---
+
+## 🏷️ Release Tags
+
+Maintainers can publish major/minor tags with:
+
+```bash
+./scripts/release-v1.sh
+```
+
+On Windows:
+
+```powershell
+./scripts/release-v1.ps1
+```
+
+This creates and pushes `v1.0.0` plus a moving `v1` major pointer.
 
 ---
 

@@ -1,24 +1,122 @@
-name: Nexus Shield Security Gatekeeper
-description: Edge-speed PII & Secret leak detection for PRs and CI/CD pipelines
-author: baturhantasdelen-sudo
+name: 'Nexus Shield Security Scan'
+description: 'Ultra-fast, policy-driven PII & secret protection for developer workflows'
+author: 'Nexus Shield'
 branding:
-  icon: shield
-  color: blue
+  icon: 'shield'
+  color: 'purple'
 
 inputs:
-  github-token:
-    description: GitHub Token for reading diffs and posting PR comments
+  api_key:
+    description: 'Nexus Shield API Key'
     required: true
-    default: ${{ github.token }}
-  nexus-api-key:
-    description: Optional API Key to log anonymous leak stats to your Nexus Shield Dashboard
+  profile:
+    description: 'PII Profile (TR, US, GLOBAL)'
     required: false
-    default: ''
-  fail-on-detection:
-    description: Whether to fail the workflow step when leaks are detected
+    default: 'TR'
+  policy_file:
+    description: 'Path to Nexus Shield policy file (.nexus-shield.yml)'
     required: false
-    default: 'true'
+    default: '.nexus-shield.yml'
 
 runs:
-  using: node24
-  main: dist/index.js
+  using: 'composite'
+  steps:
+    - name: Run Nexus Shield Scan
+      shell: bash
+      env:
+        NEXUS_API_KEY: ${{ inputs.api_key }}
+        NEXUS_PROFILE: ${{ inputs.profile }}
+        POLICY_FILE: ${{ inputs.policy_file }}
+        REPO_NAME: ${{ github.repository }}
+        COMMIT_SHA: ${{ github.sha }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_BASE_REF: ${{ github.base_ref }}
+      run: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import os
+        import pathlib
+        import subprocess
+        import sys
+
+        try:
+            import yaml
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pyyaml"])
+            import yaml
+
+        repo_name = os.environ["REPO_NAME"]
+        commit_sha = os.environ["COMMIT_SHA"]
+        profile = os.environ.get("NEXUS_PROFILE", "TR")
+        policy_file = os.environ.get("POLICY_FILE", ".nexus-shield.yml")
+        event_name = os.environ.get("GITHUB_EVENT_NAME", "push")
+        base_ref = os.environ.get("GITHUB_BASE_REF", "main")
+
+        policy = {"version": 1, "profile": profile}
+        policy_path = pathlib.Path(policy_file)
+        if policy_path.is_file():
+            loaded = yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
+            if isinstance(loaded, dict):
+                policy.update(loaded)
+
+        changed: list[str] = []
+        try:
+            if event_name == "pull_request":
+                diff_cmd = ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"]
+            else:
+                diff_cmd = ["git", "diff", "--name-only", "HEAD~1", "HEAD"]
+            result = subprocess.run(diff_cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0 and result.stdout.strip():
+                changed = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        except Exception:
+            changed = []
+
+        if not changed:
+            fallback = os.environ.get("SCAN_PATH", "src/config.ts")
+            changed = [fallback]
+
+        files = []
+        for path in changed[:100]:
+            file_path = pathlib.Path(path)
+            if not file_path.is_file():
+                continue
+            if file_path.stat().st_size > 512_000:
+                continue
+            files.append(
+                {
+                    "path": path.replace("\\", "/"),
+                    "content": file_path.read_text(encoding="utf-8", errors="replace"),
+                }
+            )
+
+        if not files:
+            files = [{"path": changed[0], "content": "check"}]
+
+        payload = {
+            "repo_name": repo_name,
+            "commit_sha": commit_sha,
+            "policy": policy,
+            "files": files,
+        }
+
+        pathlib.Path("scan-payload.json").write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"Prepared scan payload with {len(files)} file(s)")
+        PY
+
+        curl -fsSL -X POST "https://nexus-shield-dashboard.vercel.app/api/v1/scan?format=sarif" \
+          -H "x-api-key: ${NEXUS_API_KEY}" \
+          -H "Content-Type: application/json" \
+          --data-binary @scan-payload.json \
+          -o results.sarif
+
+        echo "SARIF 2.1.0 results written to results.sarif"
+
+    - name: Upload SARIF file to GitHub Code Scanning
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: results.sarif
