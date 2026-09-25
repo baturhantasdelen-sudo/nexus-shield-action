@@ -1,271 +1,541 @@
-name: 'Nexus Shield Security Scan'
-description: 'Ultra-fast, policy-driven PII & secret protection for developer workflows'
-author: 'Nexus Shield'
-branding:
-  icon: 'shield'
-  color: 'purple'
-
-inputs:
-  api_key:
-    description: 'Nexus Shield API Key'
-    required: true
-  profile:
-    description: 'PII Profile (TR, US, GLOBAL)'
-    required: false
-    default: 'TR'
-  policy_file:
-    description: 'Path to Nexus Shield policy file (.nexus-shield.yml)'
-    required: false
-    default: '.nexus-shield.yml'
-  auto_fix:
-    description: 'Open a Pull Request with auto-remediated files when findings exist'
-    required: false
-    default: 'false'
-  base_branch:
-    description: 'Base branch for auto-fix PR (main or master)'
-    required: false
-    default: 'main'
-
-runs:
-  using: 'composite'
-  steps:
-    - name: Run Nexus Shield Scan
-      shell: bash
-      env:
-        NEXUS_API_KEY: ${{ inputs.api_key }}
-        NEXUS_PROFILE: ${{ inputs.profile }}
-        POLICY_FILE: ${{ inputs.policy_file }}
-        REPO_NAME: ${{ github.repository }}
-        COMMIT_SHA: ${{ github.sha }}
-        GITHUB_EVENT_NAME: ${{ github.event_name }}
-        GITHUB_BASE_REF: ${{ github.base_ref }}
-        AUTO_FIX: ${{ inputs.auto_fix }}
-      run: |
-        set -euo pipefail
-
-        python3 - <<'PY'
-        import json
-        import os
-        import pathlib
-        import subprocess
-        import sys
-
-        try:
-            import yaml
-        except ImportError:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pyyaml"])
-            import yaml
-
-        repo_name = os.environ["REPO_NAME"]
-        commit_sha = os.environ["COMMIT_SHA"]
-        profile = os.environ.get("NEXUS_PROFILE", "TR")
-        policy_file = os.environ.get("POLICY_FILE", ".nexus-shield.yml")
-        event_name = os.environ.get("GITHUB_EVENT_NAME", "push")
-        base_ref = os.environ.get("GITHUB_BASE_REF", "main")
-        auto_fix = os.environ.get("AUTO_FIX", "false").lower() == "true"
-
-        policy = {"version": 1, "profile": profile}
-        policy_path = pathlib.Path(policy_file)
-        if policy_path.is_file():
-            loaded = yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
-            if isinstance(loaded, dict):
-                policy.update(loaded)
-
-        changed: list[str] = []
-        try:
-            if event_name == "pull_request":
-                diff_cmd = ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"]
-            else:
-                diff_cmd = ["git", "diff", "--name-only", "HEAD~1", "HEAD"]
-            result = subprocess.run(diff_cmd, capture_output=True, text=True, check=False)
-            if result.returncode == 0 and result.stdout.strip():
-                changed = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        except Exception:
-            changed = []
-
-        if not changed:
-            fallback = os.environ.get("SCAN_PATH", "src/config.ts")
-            changed = [fallback]
-
-        files = []
-        for path in changed[:100]:
-            file_path = pathlib.Path(path)
-            if not file_path.is_file():
-                continue
-            if file_path.stat().st_size > 512_000:
-                continue
-            files.append(
-                {
-                    "path": path.replace("\\", "/"),
-                    "content": file_path.read_text(encoding="utf-8", errors="replace"),
-                }
-            )
-
-        if not files:
-            files = [{"path": changed[0], "content": "check"}]
-
-        payload = {
-            "repo_name": repo_name,
-            "commit_sha": commit_sha,
-            "policy": policy,
-            "files": files,
-        }
-
-        pathlib.Path("scan-payload.json").write_text(
-            json.dumps(payload, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        print(f"Prepared scan payload with {len(files)} file(s)")
-        PY
-
-        curl -fsSL -X POST "https://nexus-shield-dashboard.vercel.app/api/v1/scan?format=sarif" \
-          -H "x-api-key: ${NEXUS_API_KEY}" \
-          -H "Content-Type: application/json" \
-          --data-binary @scan-payload.json \
-          -o results.sarif
-
-        echo "SARIF 2.1.0 results written to results.sarif"
-
-        if [ "${AUTO_FIX}" = "true" ]; then
-          curl -fsSL -X POST "https://nexus-shield-dashboard.vercel.app/api/v1/scan?format=json&include_fixes=true" \
-            -H "x-api-key: ${NEXUS_API_KEY}" \
-            -H "Content-Type: application/json" \
-            --data-binary @scan-payload.json \
-            -o scan-result.json
-          echo "Remediation payload written to scan-result.json"
-        fi
-
-    - name: Upload SARIF file to GitHub Code Scanning
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: results.sarif
-
-    - name: Auto-Fix and Open Pull Request
-      if: inputs.auto_fix == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-        BASE_BRANCH: ${{ inputs.base_branch }}
-        REPO_NAME: ${{ github.repository }}
-      run: |
-        set -euo pipefail
-
-        if [ ! -f scan-result.json ]; then
-          echo "No scan-result.json — skipping auto-fix"
-          exit 0
-        fi
-
-        python3 - <<'PY'
-        import json
-        import os
-        import pathlib
-        import subprocess
-        import sys
-        from datetime import datetime, timezone
-
-        result_path = pathlib.Path("scan-result.json")
-        payload = json.loads(result_path.read_text(encoding="utf-8"))
-        findings = payload.get("findings") or []
-        fixed_files = payload.get("fixed_files") or []
-
-        if not findings or not fixed_files:
-            print("No remediable findings — skipping auto-fix PR")
-            pathlib.Path("auto-fix-skip").write_text("skip", encoding="utf-8")
-            sys.exit(0)
-
-        base_branch = os.environ.get("BASE_BRANCH", "main")
-        date_part = datetime.now(timezone.utc).strftime("%Y%m%d")
-        short_id = payload.get("scan_id", "scan")[-6:]
-        branch = f"nexus-shield/fix-{date_part}-{short_id}"
-
-        for item in fixed_files:
-            target = pathlib.Path(item["path"])
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(item["content"], encoding="utf-8")
-            print(f"Applied remediation to {item['path']}")
-
-        env_lines = payload.get("env_example_additions") or []
-        if env_lines:
-            env_example = pathlib.Path(".env.example")
-            existing = env_example.read_text(encoding="utf-8") if env_example.is_file() else ""
-            additions = []
-            for line in env_lines:
-                if line not in existing:
-                    additions.append(line)
-            if additions:
-                block = "\n".join(additions)
-                env_example.write_text(
-                    (existing.rstrip() + "\n\n# Nexus Shield auto-fix suggestions\n" + block + "\n").lstrip(),
-                    encoding="utf-8",
-                )
-                print("Updated .env.example with suggested env vars")
-
-        subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
-        subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
-        subprocess.run(["git", "checkout", "-b", branch], check=True)
-
-        paths = [item["path"] for item in fixed_files]
-        if env_lines and pathlib.Path(".env.example").is_file():
-            paths.append(".env.example")
-
-        subprocess.run(["git", "add", *paths], check=True)
-        subprocess.run(
-            [
-                "git",
-                "commit",
-                "-m",
-                "fix(security): auto-remediate PII and secret leaks via Nexus Shield",
-            ],
-            check=True,
-        )
-        subprocess.run(["git", "push", "--force", "-u", "origin", branch], check=True)
-
-        summary_lines = [
-            "## Nexus Shield Auto-Fix Summary",
-            "",
-            f"**Findings remediated:** {len(findings)}",
-            "",
-            "### Fixed files",
-        ]
-
-        for item in fixed_files:
-            summary_lines.append(f"- `{item['path']}` ({len(item.get('fixes') or [])} fix(es))")
-            for fix in item.get("fixes") or []:
-                summary_lines.append(
-                    f"  - **{fix.get('type')}** line {fix.get('line')}: `{fix.get('original')}` → `{fix.get('replacement')}`"
-                )
-
-        if env_lines:
-            summary_lines.extend(["", "### Suggested `.env.example` entries", ""])
-            for line in env_lines:
-                summary_lines.append(f"- `{line}`")
-
-        summary_lines.extend(
-            [
-                "",
-                "---",
-                "_Generated by [Nexus Shield](https://nexusshield.ai) Auto-Remediation Engine._",
-            ]
-        )
-
-        body = "\n".join(summary_lines)
-        pathlib.Path("auto-fix-pr-body.md").write_text(body, encoding="utf-8")
-        pathlib.Path("auto-fix-branch.txt").write_text(branch, encoding="utf-8")
-        pathlib.Path("auto-fix-base.txt").write_text(base_branch, encoding="utf-8")
-        print(f"Created branch {branch} with remediated files")
-        PY
-
-        if [ -f auto-fix-skip ]; then
-          echo "Auto-fix skipped"
-          exit 0
-        fi
-
-        BRANCH="$(cat auto-fix-branch.txt)"
-        BASE="$(cat auto-fix-base.txt)"
-
-        gh pr create \
-          --base "${BASE}" \
-          --head "${BRANCH}" \
-          --title "🛡️ [Nexus Shield] Auto-Fix: Resolved PII/Secret Leaks" \
-          --body-file auto-fix-pr-body.md
-
+name: 'Nexus Shield Security Scan'
+
+description: 'Ultra-fast, policy-driven PII & secret protection for developer workflows'
+
+author: 'Nexus Shield'
+
+branding:
+
+  icon: 'shield'
+
+  color: 'purple'
+
+
+
+inputs:
+
+  api_key:
+
+    description: 'Nexus Shield API Key'
+
+    required: true
+
+  profile:
+
+    description: 'PII Profile (TR, US, GLOBAL)'
+
+    required: false
+
+    default: 'TR'
+
+  policy_file:
+
+    description: 'Path to Nexus Shield policy file (.nexus-shield.yml)'
+
+    required: false
+
+    default: '.nexus-shield.yml'
+
+  auto_fix:
+
+    description: 'Open a Pull Request with auto-remediated files when findings exist'
+
+    required: false
+
+    default: 'false'
+
+  base_branch:
+
+    description: 'Base branch for auto-fix PR (main or master)'
+
+    required: false
+
+    default: 'main'
+
+
+
+runs:
+
+  using: 'composite'
+
+  steps:
+
+    - name: Run Nexus Shield Scan
+
+      shell: bash
+
+      env:
+
+        NEXUS_API_KEY: ${{ inputs.api_key }}
+
+        NEXUS_PROFILE: ${{ inputs.profile }}
+
+        POLICY_FILE: ${{ inputs.policy_file }}
+
+        REPO_NAME: ${{ github.repository }}
+
+        COMMIT_SHA: ${{ github.sha }}
+
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+
+        GITHUB_BASE_REF: ${{ github.base_ref }}
+
+        AUTO_FIX: ${{ inputs.auto_fix }}
+
+      run: |
+
+        set -euo pipefail
+
+
+
+        python3 - <<'PY'
+
+        import json
+
+        import os
+
+        import pathlib
+
+        import subprocess
+
+        import sys
+
+
+
+        try:
+
+            import yaml
+
+        except ImportError:
+
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pyyaml"])
+
+            import yaml
+
+
+
+        repo_name = os.environ["REPO_NAME"]
+
+        commit_sha = os.environ["COMMIT_SHA"]
+
+        profile = os.environ.get("NEXUS_PROFILE", "TR")
+
+        policy_file = os.environ.get("POLICY_FILE", ".nexus-shield.yml")
+
+        event_name = os.environ.get("GITHUB_EVENT_NAME", "push")
+
+        base_ref = os.environ.get("GITHUB_BASE_REF", "main")
+
+        auto_fix = os.environ.get("AUTO_FIX", "false").lower() == "true"
+
+
+
+        policy = {"version": 1, "profile": profile}
+
+        policy_path = pathlib.Path(policy_file)
+
+        if policy_path.is_file():
+
+            loaded = yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
+
+            if isinstance(loaded, dict):
+
+                policy.update(loaded)
+
+
+
+        changed: list[str] = []
+
+        try:
+
+            if event_name == "pull_request":
+
+                diff_cmd = ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"]
+
+            else:
+
+                diff_cmd = ["git", "diff", "--name-only", "HEAD~1", "HEAD"]
+
+            result = subprocess.run(diff_cmd, capture_output=True, text=True, check=False)
+
+            if result.returncode == 0 and result.stdout.strip():
+
+                changed = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+        except Exception:
+
+            changed = []
+
+
+
+        if not changed:
+
+            fallback = os.environ.get("SCAN_PATH", "src/config.ts")
+
+            changed = [fallback]
+
+
+
+        files = []
+
+        for path in changed[:100]:
+
+            file_path = pathlib.Path(path)
+
+            if not file_path.is_file():
+
+                continue
+
+            if file_path.stat().st_size > 512_000:
+
+                continue
+
+            files.append(
+
+                {
+
+                    "path": path.replace("\\", "/"),
+
+                    "content": file_path.read_text(encoding="utf-8", errors="replace"),
+
+                }
+
+            )
+
+
+
+        if not files:
+
+            files = [{"path": changed[0], "content": "check"}]
+
+
+
+        payload = {
+
+            "repo_name": repo_name,
+
+            "commit_sha": commit_sha,
+
+            "policy": policy,
+
+            "files": files,
+
+        }
+
+
+
+        pathlib.Path("scan-payload.json").write_text(
+
+            json.dumps(payload, ensure_ascii=False),
+
+            encoding="utf-8",
+
+        )
+
+        print(f"Prepared scan payload with {len(files)} file(s)")
+
+        PY
+
+
+
+        curl -fsSL -X POST "https://nexus-shield-dashboard.vercel.app/api/v1/scan?format=sarif" \
+
+          -H "x-api-key: ${NEXUS_API_KEY}" \
+
+          -H "Content-Type: application/json" \
+
+          --data-binary @scan-payload.json \
+
+          -o results.sarif
+
+
+
+        echo "SARIF 2.1.0 results written to results.sarif"
+
+
+
+        if [ "${AUTO_FIX}" = "true" ]; then
+
+          curl -fsSL -X POST "https://nexus-shield-dashboard.vercel.app/api/v1/scan?format=json&include_fixes=true" \
+
+            -H "x-api-key: ${NEXUS_API_KEY}" \
+
+            -H "Content-Type: application/json" \
+
+            --data-binary @scan-payload.json \
+
+            -o scan-result.json
+
+          echo "Remediation payload written to scan-result.json"
+
+        fi
+
+
+
+    - name: Upload SARIF file to GitHub Code Scanning
+
+      uses: github/codeql-action/upload-sarif@v3
+
+      with:
+
+        sarif_file: results.sarif
+
+
+
+    - name: Auto-Fix and Open Pull Request
+
+      if: inputs.auto_fix == 'true'
+
+      shell: bash
+
+      env:
+
+        GH_TOKEN: ${{ github.token }}
+
+        BASE_BRANCH: ${{ inputs.base_branch }}
+
+        REPO_NAME: ${{ github.repository }}
+
+      run: |
+
+        set -euo pipefail
+
+
+
+        if [ ! -f scan-result.json ]; then
+
+          echo "No scan-result.json — skipping auto-fix"
+
+          exit 0
+
+        fi
+
+
+
+        python3 - <<'PY'
+
+        import json
+
+        import os
+
+        import pathlib
+
+        import subprocess
+
+        import sys
+
+        from datetime import datetime, timezone
+
+
+
+        result_path = pathlib.Path("scan-result.json")
+
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        findings = payload.get("findings") or []
+
+        fixed_files = payload.get("fixed_files") or []
+
+
+
+        if not findings or not fixed_files:
+
+            print("No remediable findings — skipping auto-fix PR")
+
+            pathlib.Path("auto-fix-skip").write_text("skip", encoding="utf-8")
+
+            sys.exit(0)
+
+
+
+        base_branch = os.environ.get("BASE_BRANCH", "main")
+
+        date_part = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+        short_id = payload.get("scan_id", "scan")[-6:]
+
+        branch = f"nexus-shield/fix-{date_part}-{short_id}"
+
+
+
+        for item in fixed_files:
+
+            target = pathlib.Path(item["path"])
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+            target.write_text(item["content"], encoding="utf-8")
+
+            print(f"Applied remediation to {item['path']}")
+
+
+
+        env_lines = payload.get("env_example_additions") or []
+
+        if env_lines:
+
+            env_example = pathlib.Path(".env.example")
+
+            existing = env_example.read_text(encoding="utf-8") if env_example.is_file() else ""
+
+            additions = []
+
+            for line in env_lines:
+
+                if line not in existing:
+
+                    additions.append(line)
+
+            if additions:
+
+                block = "\n".join(additions)
+
+                env_example.write_text(
+
+                    (existing.rstrip() + "\n\n# Nexus Shield auto-fix suggestions\n" + block + "\n").lstrip(),
+
+                    encoding="utf-8",
+
+                )
+
+                print("Updated .env.example with suggested env vars")
+
+
+
+        subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+
+        subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
+
+        subprocess.run(["git", "checkout", "-b", branch], check=True)
+
+
+
+        paths = [item["path"] for item in fixed_files]
+
+        if env_lines and pathlib.Path(".env.example").is_file():
+
+            paths.append(".env.example")
+
+
+
+        subprocess.run(["git", "add", *paths], check=True)
+
+        subprocess.run(
+
+            [
+
+                "git",
+
+                "commit",
+
+                "-m",
+
+                "fix(security): auto-remediate PII and secret leaks via Nexus Shield",
+
+            ],
+
+            check=True,
+
+        )
+
+        subprocess.run(["git", "push", "--force", "-u", "origin", branch], check=True)
+
+
+
+        summary_lines = [
+
+            "## Nexus Shield Auto-Fix Summary",
+
+            "",
+
+            f"**Findings remediated:** {len(findings)}",
+
+            "",
+
+            "### Fixed files",
+
+        ]
+
+
+
+        for item in fixed_files:
+
+            summary_lines.append(f"- `{item['path']}` ({len(item.get('fixes') or [])} fix(es))")
+
+            for fix in item.get("fixes") or []:
+
+                summary_lines.append(
+
+                    f"  - **{fix.get('type')}** line {fix.get('line')}: `{fix.get('original')}` → `{fix.get('replacement')}`"
+
+                )
+
+
+
+        if env_lines:
+
+            summary_lines.extend(["", "### Suggested `.env.example` entries", ""])
+
+            for line in env_lines:
+
+                summary_lines.append(f"- `{line}`")
+
+
+
+        summary_lines.extend(
+
+            [
+
+                "",
+
+                "---",
+
+                "_Generated by [Nexus Shield](https://nexusshield.ai) Auto-Remediation Engine._",
+
+            ]
+
+        )
+
+
+
+        body = "\n".join(summary_lines)
+
+        pathlib.Path("auto-fix-pr-body.md").write_text(body, encoding="utf-8")
+
+        pathlib.Path("auto-fix-branch.txt").write_text(branch, encoding="utf-8")
+
+        pathlib.Path("auto-fix-base.txt").write_text(base_branch, encoding="utf-8")
+
+        print(f"Created branch {branch} with remediated files")
+
+        PY
+
+
+
+        if [ -f auto-fix-skip ]; then
+
+          echo "Auto-fix skipped"
+
+          exit 0
+
+        fi
+
+
+
+        BRANCH="$(cat auto-fix-branch.txt)"
+
+        BASE="$(cat auto-fix-base.txt)"
+
+
+
+        gh pr create \
+
+          --base "${BASE}" \
+
+          --head "${BRANCH}" \
+
+          --title "🛡️ [Nexus Shield] Auto-Fix: Resolved PII/Secret Leaks" \
+
+          --body-file auto-fix-pr-body.md
+
+
